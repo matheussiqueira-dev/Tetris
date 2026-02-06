@@ -141,4 +141,81 @@ describe("Scores API", () => {
 
     expect(lastStatus).toBe(429);
   });
+
+  it("bloqueia score sprint com menos de 40 linhas", async () => {
+    const response = await POST(
+      new Request("http://localhost/api/scores", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-forwarded-for": "10.1.1.10"
+        },
+        body: JSON.stringify({
+          name: "Runner",
+          score: 900,
+          lines: 33,
+          level: 4,
+          mode: "sprint40",
+          durationMs: 54000
+        })
+      })
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("ordena sprint por linhas e tempo", async () => {
+    const submit = async (payload: unknown, ip: string) =>
+      POST(
+        new Request("http://localhost/api/scores", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-forwarded-for": ip
+          },
+          body: JSON.stringify(payload)
+        })
+      );
+
+    await submit(
+      {
+        name: "Fast40",
+        score: 900,
+        lines: 40,
+        level: 6,
+        mode: "sprint40",
+        durationMs: 65000
+      },
+      "10.1.1.11"
+    );
+    await submit(
+      {
+        name: "Slow40",
+        score: 1800,
+        lines: 40,
+        level: 7,
+        mode: "sprint40",
+        durationMs: 90000
+      },
+      "10.1.1.12"
+    );
+    await submit(
+      {
+        name: "PlusLines",
+        score: 100,
+        lines: 41,
+        level: 7,
+        mode: "sprint40",
+        durationMs: 120000
+      },
+      "10.1.1.13"
+    );
+
+    const response = await GET(new Request("http://localhost/api/scores?mode=sprint40&limit=10"));
+    const json = (await response.json()) as { items: Array<{ name: string }> };
+    expect(response.status).toBe(200);
+    expect(json.items[0].name).toBe("PlusLines");
+    expect(json.items[1].name).toBe("Fast40");
+    expect(json.items[2].name).toBe("Slow40");
+  });
 });

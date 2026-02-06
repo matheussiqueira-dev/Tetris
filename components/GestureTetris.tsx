@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { fetchScores, submitScore, type ScoreItem } from "@/lib/client/scoreboard-api";
+import { usePersistentState } from "@/hooks/use-persistent-state";
 import { renderTetris } from "@/lib/tetris/render";
 import { TetrisSession, type SessionEndReason } from "@/lib/tetris/session";
 import { GAME_MODE_LIST, type GameModeId } from "@/lib/shared/game-mode";
@@ -40,6 +41,13 @@ interface FinalSnapshot {
   level: number;
   durationMs: number;
   endReason: SessionEndReason;
+}
+
+interface GestureTimelineItem {
+  id: string;
+  label: string;
+  confidence: number;
+  timestamp: number;
 }
 
 const PROCESS_WIDTH = 320;
@@ -218,9 +226,9 @@ export default function GestureTetris() {
   const cvReadyRef = useRef(false);
   const sensitivityRef = useRef(52);
 
-  const [mode, setMode] = useState<GameModeId>("classic");
-  const [sensitivity, setSensitivity] = useState(52);
-  const [playerName, setPlayerName] = useState("Player");
+  const [mode, setMode] = usePersistentState<GameModeId>("gesture_tetris_mode", "classic");
+  const [sensitivity, setSensitivity] = usePersistentState<number>("gesture_tetris_sensitivity", 52);
+  const [playerName, setPlayerName] = usePersistentState<string>("gesture_tetris_player_name", "Player");
 
   const [cameraStatus, setCameraStatus] = useState<RuntimeStatus>("loading");
   const [cvStatus, setCvStatus] = useState<RuntimeStatus>("loading");
@@ -243,12 +251,19 @@ export default function GestureTetris() {
   const [leaderboard, setLeaderboard] = useState<ScoreItem[]>([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
   const [leaderboardError, setLeaderboardError] = useState<string | null>(null);
+  const [gestureTimeline, setGestureTimeline] = useState<GestureTimelineItem[]>([]);
 
   const [finalSnapshot, setFinalSnapshot] = useState<FinalSnapshot | null>(null);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
 
   const selectedMode = useMemo(() => GAME_MODE_LIST.find((item) => item.id === mode), [mode]);
+
+  useEffect(() => {
+    if (!GAME_MODE_LIST.some((item) => item.id === mode)) {
+      setMode("classic");
+    }
+  }, [mode, setMode]);
 
   const loadLeaderboard = useCallback(async (selectedModeId: GameModeId) => {
     setLeaderboardLoading(true);
@@ -273,6 +288,7 @@ export default function GestureTetris() {
       setFinalSnapshot(null);
       setSubmitMessage(null);
       setGestureLabel("Aguardando gesto");
+      setGestureTimeline([]);
       setHud((previous) => ({
         ...previous,
         score: 0,
@@ -518,13 +534,25 @@ export default function GestureTetris() {
             debugRef.current = result.debug;
 
             if (result.gesture) {
-              applyGesture(session, result.gesture.kind);
+              const recognized = result.gesture;
+              applyGesture(session, recognized.kind);
               gestureRef.current = {
-                label: result.gesture.label,
-                confidence: result.gesture.confidence,
+                label: recognized.label,
+                confidence: recognized.confidence,
                 expiresAt: now + 700
               };
-              setGestureLabel(result.gesture.label);
+              setGestureLabel(recognized.label);
+              setGestureTimeline((previous) =>
+                [
+                  {
+                    id: `${now}-${Math.random().toString(16).slice(2, 8)}`,
+                    label: recognized.label,
+                    confidence: recognized.confidence,
+                    timestamp: now
+                  },
+                  ...previous
+                ].slice(0, 6)
+              );
             }
           }
         }
@@ -755,6 +783,19 @@ export default function GestureTetris() {
                 ))}
               </ol>
             )}
+          </section>
+
+          <section className="panel-card timeline-card">
+            <h3>Timeline de Gestos</h3>
+            <ul>
+              {gestureTimeline.length === 0 && <li>Nenhum gesto capturado recentemente.</li>}
+              {gestureTimeline.map((item) => (
+                <li key={item.id}>
+                  <span>{item.label}</span>
+                  <strong>{Math.round(item.confidence * 100)}%</strong>
+                </li>
+              ))}
+            </ul>
           </section>
         </aside>
       </div>

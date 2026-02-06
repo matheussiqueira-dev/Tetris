@@ -15,6 +15,7 @@ const titleFont = Bebas_Neue({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
   title: "Tetris por Gestos com OpenCV.js",
   description: "Tetris web em Next.js controlado por gestos de mao usando OpenCV.js e webcam.",
   keywords: [

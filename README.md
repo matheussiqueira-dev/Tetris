@@ -1,6 +1,6 @@
 # Gesture Tetris Arena
 
-Aplicação web de Tetris controlado por gestos da mão via webcam, com detecção em tempo real usando OpenCV.js, frontend em Next.js e API de leaderboard.
+Aplicação web de Tetris controlado por gestos da mão via webcam, com detecção em tempo real usando OpenCV.js, frontend em Next.js e API versionada de leaderboard.
 
 ## Visão Geral
 
@@ -9,7 +9,7 @@ O projeto combina:
 - Gameplay clássico de Tetris (engine determinística, colisão, rotação, linhas, nível e score).
 - Input natural por visão computacional (movimento lateral, rotação do pulso e hard drop por gesto descendente rápido).
 - Interface moderna com feedback visual contínuo, acessível em desktop e mobile.
-- Backend HTTP para ranking com validação, rate limiting e logs estruturados.
+- Backend HTTP para ranking com validação, rate limiting, logs estruturados e camada de serviço desacoplada.
 
 Público-alvo:
 
@@ -24,16 +24,18 @@ Público-alvo:
 - `lib/tetris/*` (Domínio): regras de jogo puras, sem dependência de UI.
 - `lib/vision/*` (Infra CV): carga do OpenCV.js e detector de gestos.
 - `components/GestureTetris.tsx` (Apresentação + Orquestração): loop, render, eventos, UX.
-- `app/api/*` (Backend/API): endpoints de saúde e ranking.
-- `lib/server/*` (Aplicação backend): validação, segurança, persistência em memória.
+- `app/api/*` (Backend/API): endpoints de saúde, ranking e versão `v1`.
+- `lib/server/*` (Aplicação backend): validação, segurança, persistência em memória e serviços de domínio.
 - `lib/shared/*` (Contrato compartilhado): modos de jogo entre frontend e backend.
+- `hooks/*` (Estado UX): persistência de preferências em `localStorage`.
 
 ### Princípios Aplicados
 
 - Separação de responsabilidades: engine, sessão de jogo, detecção de gestos, render e API desacoplados.
 - DRY: constantes e contratos compartilhados de modo de jogo.
 - Escalabilidade: repositório de placar abstrato (`ScoreRepository`) pronto para troca por banco real.
-- Segurança e robustez: validação com Zod, sanitização de nome, rate limiting por IP, rota administrativa protegida por token.
+- Segurança e robustez: validação com Zod, sanitização de nome, rate limiting por IP, headers de segurança e rota administrativa protegida por token.
+- Contrato evolutivo: endpoints `v1` e especificação mínima em `/api/v1/spec`.
 
 ### SEO e Rastreamento
 
@@ -57,11 +59,19 @@ app/
   api/
     health/route.ts
     scores/route.ts
+    v1/
+      health/route.ts
+      scores/route.ts
+      spec/route.ts
   globals.css
   layout.tsx
   page.tsx
+  robots.ts
+  sitemap.ts
 components/
   GestureTetris.tsx
+hooks/
+  use-persistent-state.ts
 lib/
   client/
     scoreboard-api.ts
@@ -72,6 +82,8 @@ lib/
       rate-limiter.ts
     scores/
       repository.ts
+      service.ts
+      sort.ts
       store.ts
       types.ts
     validation/
@@ -89,6 +101,7 @@ lib/
     opencv-loader.ts
 tests/
   api-scores.test.ts
+  scores-sort.test.ts
   tetris-engine.test.ts
   tetris-session.test.ts
 ```
@@ -101,21 +114,23 @@ tests/
 - Ajuste de sensibilidade dos gestos em tempo real.
 - Feedback de detecção (confiabilidade, área, velocidade e ângulo).
 - Leaderboard com envio e leitura por modo.
+- Persistência local de modo, sensibilidade e nome do jogador.
+- Timeline de gestos reconhecidos para auditoria visual de input.
 
 ## API
 
-### `GET /api/health`
+### `GET /api/health` e `GET /api/v1/health`
 
 Retorna status da aplicação.
 
-### `GET /api/scores?mode=<mode>&limit=<n>`
+### `GET /api/scores?mode=<mode>&limit=<n>` e `GET /api/v1/scores?mode=<mode>&limit=<n>`
 
 Retorna ranking filtrado por modo.
 
 - `mode`: `classic | sprint40 | blitz120` (opcional)
 - `limit`: 1 a 50 (opcional)
 
-### `POST /api/scores`
+### `POST /api/scores` e `POST /api/v1/scores`
 
 Envia um score validado.
 
@@ -138,13 +153,18 @@ Limpa ranking (uso administrativo).
 
 - Requer header `x-admin-token` igual a `SCOREBOARD_ADMIN_TOKEN`.
 
+### `GET /api/v1/spec`
+
+Retorna especificação simplificada dos endpoints públicos.
+
 ## Segurança e Qualidade
 
 - Validação estrita de payload com Zod.
 - Sanitização e limites de entrada.
 - Rate limiting para submissão de score.
+- Regras de consistência por modo (`sprint40` exige mínimo de linhas; `blitz120` limita duração).
 - Logs estruturados no backend.
-- Testes automatizados para domínio e API.
+- Testes automatizados para domínio, ordenação de ranking e API.
 
 ## Instalação e Execução
 

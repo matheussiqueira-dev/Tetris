@@ -20,8 +20,10 @@ export interface SubmitScorePayload {
   durationMs: number;
 }
 
+const SCORES_ENDPOINT = "/api/v1/scores";
+
 export async function fetchScores(mode: GameModeId, limit = 8): Promise<ScoreItem[]> {
-  const response = await fetch(`/api/scores?mode=${mode}&limit=${limit}`, {
+  const response = await fetch(`${SCORES_ENDPOINT}?mode=${mode}&limit=${limit}`, {
     method: "GET",
     cache: "no-store"
   });
@@ -37,7 +39,7 @@ export async function fetchScores(mode: GameModeId, limit = 8): Promise<ScoreIte
 export async function submitScore(
   payload: SubmitScorePayload
 ): Promise<{ item: ScoreItem; placement: number }> {
-  const response = await fetch("/api/scores", {
+  const response = await fetch(SCORES_ENDPOINT, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
