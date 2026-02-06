@@ -2,6 +2,8 @@ let openCvPromise: Promise<unknown> | null = null;
 
 const SCRIPT_ID = "opencv-js-runtime";
 const OPENCV_URL = "https://docs.opencv.org/4.x/opencv.js";
+const POLL_INTERVAL_MS = 50;
+const MAX_POLL_ATTEMPTS = 200; // 10 seconds total
 
 type OpenCvLike = {
   Mat?: unknown;
@@ -11,6 +13,29 @@ type OpenCvLike = {
 
 function isReady(cv: OpenCvLike | undefined): cv is OpenCvLike & { Mat: unknown } {
   return Boolean(cv && cv.Mat);
+}
+
+function waitForReady(resolve: (cv: unknown) => void, reject: (err: Error) => void): void {
+  let attempts = 0;
+
+  const poll = () => {
+    const runtime = window.cv as OpenCvLike | undefined;
+
+    if (isReady(runtime)) {
+      resolve(runtime);
+      return;
+    }
+
+    attempts += 1;
+    if (attempts >= MAX_POLL_ATTEMPTS) {
+      reject(new Error("Timeout aguardando inicializacao do OpenCV.js."));
+      return;
+    }
+
+    setTimeout(poll, POLL_INTERVAL_MS);
+  };
+
+  poll();
 }
 
 export function loadOpenCv(): Promise<unknown> {
@@ -31,7 +56,7 @@ export function loadOpenCv(): Promise<unknown> {
     const handleLoaded = () => {
       const runtime = window.cv as OpenCvLike | undefined;
       if (!runtime) {
-        reject(new Error("OpenCV.js foi carregado, mas o objeto cv nao foi encontrado."));
+        waitForReady(resolve, reject);
         return;
       }
 
@@ -40,7 +65,9 @@ export function loadOpenCv(): Promise<unknown> {
         return;
       }
 
+      // Set callback but also poll as fallback for race condition
       runtime.onRuntimeInitialized = () => resolve(runtime);
+      waitForReady(resolve, reject);
     };
 
     const existing = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
