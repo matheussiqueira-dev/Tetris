@@ -1,35 +1,66 @@
 import type { Metadata } from "next";
-import { Bebas_Neue, Space_Grotesk } from "next/font/google";
+import { Oswald, Sora } from "next/font/google";
 import type { ReactNode } from "react";
 import "./globals.css";
 
-const bodyFont = Space_Grotesk({
+const bodyFont = Sora({
   variable: "--font-body",
   subsets: ["latin"]
 });
 
-const titleFont = Bebas_Neue({
+const titleFont = Oswald({
   variable: "--font-heading",
   subsets: ["latin"],
-  weight: "400"
+  weight: ["500", "600", "700"]
 });
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
-  title: "Tetris por Gestos com OpenCV.js",
-  description: "Tetris web em Next.js controlado por gestos de mao usando OpenCV.js e webcam.",
+  title: {
+    default: "Tetris Gesture Control Deck",
+    template: "%s | Tetris Gesture Control Deck"
+  },
+  description:
+    "Jogue Tetris no navegador com controle por gestos usando OpenCV.js, modos competitivos e leaderboard online.",
+  applicationName: "Tetris Gesture Control Deck",
   keywords: [
     "tetris",
     "opencv",
     "nextjs",
     "computer vision",
     "gestures",
-    "webcam game"
+    "webcam game",
+    "gesture control"
   ],
+  alternates: {
+    canonical: "/"
+  },
+  authors: [
+    {
+      name: "Matheus Siqueira",
+      url: "https://www.matheussiqueira.dev/"
+    }
+  ],
+  creator: "Matheus Siqueira",
+  publisher: "Matheus Siqueira",
+  category: "games",
   openGraph: {
-    title: "Tetris por Gestos com OpenCV.js",
-    description: "Jogue Tetris com controle por mao em tempo real direto no navegador.",
-    type: "website"
+    title: "Tetris Gesture Control Deck",
+    description:
+      "Experiencia de Tetris por gestos com OpenCV.js, performance em tempo real e ranking online.",
+    type: "website",
+    locale: "pt_BR",
+    siteName: "Tetris Gesture Control Deck",
+    url: "/"
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Tetris Gesture Control Deck",
+    description: "Controle Tetris com a mao via webcam e acompanhe seu ranking em tempo real."
+  },
+  robots: {
+    index: true,
+    follow: true
   }
 };
 

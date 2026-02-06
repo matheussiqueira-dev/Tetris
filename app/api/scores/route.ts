@@ -1,82 +1,85 @@
-import { NextResponse } from "next/server";
+/**
+ * Scores API Routes
+ * Handles score listing, submission, and administrative operations.
+ */
+
+import { createResponse } from "@/lib/server/api/response-builder";
+import { ApiError } from "@/lib/server/errors/api-error";
 import { scoreService } from "@/lib/server/scores/store";
 
-function noStoreHeaders(extra?: HeadersInit): HeadersInit {
-  return {
-    "Cache-Control": "no-store",
-    ...extra
-  };
-}
-
+/**
+ * GET /api/scores
+ * Lists scores with optional filtering by mode and limit.
+ */
 export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const data = scoreService.list({
-    mode: url.searchParams.get("mode"),
-    limit: url.searchParams.get("limit")
-  });
+  const res = createResponse(request);
 
-  return NextResponse.json(data, {
-    headers: noStoreHeaders()
-  });
+  try {
+    const url = new URL(request.url);
+    const data = scoreService.list({
+      mode: url.searchParams.get("mode"),
+      limit: url.searchParams.get("limit")
+    });
+
+    return res.success(data);
+  } catch (error) {
+    return res.error(error);
+  }
 }
 
+/**
+ * POST /api/scores
+ * Submits a new score entry.
+ */
 export async function POST(request: Request) {
-  const result = await scoreService.submit(request);
-  if (!result.ok) {
-    return NextResponse.json(
-      {
-        error: result.error,
-        details: result.details,
-        retryAfterMs: result.retryAfterMs
-      },
-      {
-        status: result.status,
-        headers: noStoreHeaders(
-          result.retryAfterMs
-            ? {
-                "Retry-After": String(Math.ceil(result.retryAfterMs / 1000))
-              }
-            : undefined
-        )
-      }
-    );
-  }
+  const res = createResponse(request);
 
-  return NextResponse.json(
-    {
-      item: result.item,
-      placement: result.placement
-    },
-    {
-      status: 201,
-      headers: noStoreHeaders()
+  try {
+    let payload: unknown;
+    try {
+      payload = await request.json();
+    } catch {
+      throw ApiError.badRequest("JSON invalido.");
     }
-  );
+
+    const result = scoreService.submit({
+      ip: res.ip,
+      requestId: res.requestId,
+      payload
+    });
+
+    return res.success(result, 201);
+  } catch (error) {
+    return res.error(error);
+  }
 }
 
+/**
+ * DELETE /api/scores
+ * Clears all scores. Requires admin token.
+ */
 export async function DELETE(request: Request) {
-  const configuredToken = process.env.SCOREBOARD_ADMIN_TOKEN;
-  const providedToken = request.headers.get("x-admin-token");
+  const res = createResponse(request);
 
-  if (!configuredToken || configuredToken !== providedToken) {
-    return NextResponse.json(
-      {
-        error: "Nao autorizado."
-      },
-      {
-        status: 401,
-        headers: noStoreHeaders()
-      }
-    );
-  }
+  try {
+    const configuredToken = process.env.SCOREBOARD_ADMIN_TOKEN;
+    const providedToken = request.headers.get("x-admin-token");
 
-  scoreService.clear();
-  return NextResponse.json(
-    {
-      ok: true
-    },
-    {
-      headers: noStoreHeaders()
+    if (!configuredToken || configuredToken !== providedToken) {
+      throw ApiError.unauthorized();
     }
-  );
+
+    scoreService.clear(res.requestId);
+    return res.success({ cleared: true });
+  } catch (error) {
+    return res.error(error);
+  }
+}
+
+/**
+ * OPTIONS /api/scores
+ * Handles CORS preflight requests.
+ */
+export async function OPTIONS(request: Request) {
+  return createResponse(request).options();
 }

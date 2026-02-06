@@ -1,1 +1,1 @@
-export { GET, POST, DELETE } from "@/app/api/scores/route";
+export { GET, POST, DELETE, OPTIONS } from "@/app/api/scores/route";

@@ -1,1 +1,1 @@
-export { GET } from "@/app/api/health/route";
+export { GET, OPTIONS } from "@/app/api/health/route";

@@ -1,31 +1,40 @@
-import { logger } from "@/lib/server/logger";
+/**
+ * Score Service Module
+ * Handles business logic for score submission and retrieval with validation and rate limiting.
+ */
+
+import { createLogger } from "@/lib/server/logger";
+import { ApiError } from "@/lib/server/errors/api-error";
 import type { ScoreRepository } from "@/lib/server/scores/repository";
 import type { ScoreEntry } from "@/lib/server/scores/types";
-import { getClientIp } from "@/lib/server/security/ip";
 import type { InMemoryRateLimiter } from "@/lib/server/security/rate-limiter";
 import { scoreSubmissionSchema } from "@/lib/server/validation/score-schema";
 import { isGameMode, type GameModeId } from "@/lib/shared/game-mode";
+
+const logger = createLogger({ service: "score-service" });
 
 export interface ListScoresParams {
   mode?: string | null;
   limit?: string | null;
 }
 
+export interface ListScoresResult {
+  items: ScoreEntry[];
+  total: number;
+  mode?: GameModeId;
+}
+
 export interface SubmitScoreResult {
-  ok: true;
   item: ScoreEntry;
   placement: number;
+  isHighScore: boolean;
 }
 
-export interface ServiceErrorResult {
-  ok: false;
-  status: number;
-  error: string;
-  details?: unknown;
-  retryAfterMs?: number;
+export interface SubmitScoreInput {
+  ip: string;
+  requestId: string;
+  payload: unknown;
 }
-
-type ServiceResult<T> = T | ServiceErrorResult;
 
 function parseLimit(value: string | null | undefined): number {
   const numeric = Number(value ?? "10");
@@ -53,24 +62,22 @@ function validateModeConsistency(payload: {
   mode: GameModeId;
   lines: number;
   durationMs: number;
-}): ServiceErrorResult | null {
+}): void {
   if (payload.mode === "sprint40" && payload.lines < 40) {
-    return {
-      ok: false,
-      status: 400,
-      error: "No modo Sprint 40, o score precisa ter ao menos 40 linhas."
-    };
+    throw new ApiError(
+      "No modo Sprint 40, o score precisa ter ao menos 40 linhas.",
+      400,
+      "VALIDATION_ERROR"
+    );
   }
 
   if (payload.mode === "blitz120" && payload.durationMs > 125_000) {
-    return {
-      ok: false,
-      status: 400,
-      error: "No modo Blitz 120, a duracao nao pode exceder 125 segundos."
-    };
+    throw new ApiError(
+      "No modo Blitz 120, a duracao nao pode exceder 125 segundos.",
+      400,
+      "VALIDATION_ERROR"
+    );
   }
-
-  return null;
 }
 
 export class ScoreService {
@@ -79,76 +86,87 @@ export class ScoreService {
     private readonly limiter: InMemoryRateLimiter
   ) {}
 
-  list(params: ListScoresParams): { items: ScoreEntry[] } {
+  /**
+   * Lists scores with optional filtering by mode and pagination.
+   */
+  list(params: ListScoresParams): ListScoresResult {
     const limit = parseLimit(params.limit);
     const mode = normalizeMode(params.mode);
-    return {
-      items: this.repository.list({ limit, mode })
-    };
+    const items = this.repository.list({ limit, mode });
+    const total = this.repository.count(mode);
+
+    return { items, total, mode };
   }
 
-  async submit(request: Request): Promise<ServiceResult<SubmitScoreResult>> {
-    const ip = getClientIp(request);
+  /**
+   * Submits a new score with validation and rate limiting.
+   * @throws {ApiError} When validation fails or rate limit is exceeded.
+   */
+  submit(input: SubmitScoreInput): SubmitScoreResult {
+    const { ip, requestId, payload } = input;
+
+    // Check rate limit
     const rateLimit = this.limiter.take(ip);
     if (!rateLimit.allowed) {
-      return {
-        ok: false,
-        status: 429,
-        error: "Muitas tentativas. Aguarde antes de enviar novamente.",
-        retryAfterMs: rateLimit.retryAfterMs
-      };
+      throw ApiError.rateLimitExceeded(rateLimit.retryAfterMs);
     }
 
-    let payload: unknown;
-    try {
-      payload = await request.json();
-    } catch {
-      return {
-        ok: false,
-        status: 400,
-        error: "JSON invalido."
-      };
-    }
-
+    // Validate payload
     const parsed = scoreSubmissionSchema.safeParse(payload);
     if (!parsed.success) {
-      return {
-        ok: false,
-        status: 400,
-        error: "Payload invalido.",
-        details: parsed.error.flatten()
-      };
+      throw ApiError.validationError("Payload invalido.", parsed.error.flatten());
     }
 
-    const validationError = validateModeConsistency(parsed.data);
-    if (validationError) {
-      return validationError;
-    }
+    // Validate mode-specific rules
+    validateModeConsistency(parsed.data);
 
+    // Prepare and save
     const prepared = {
       ...parsed.data,
       name: normalizeName(parsed.data.name)
     };
+
     const item = this.repository.add(prepared);
     const ranking = this.repository.list({ mode: prepared.mode, limit: 1000 });
     const placement = ranking.findIndex((entry) => entry.id === item.id) + 1;
+    const isHighScore = placement === 1;
 
     logger.info("Score submitted", {
+      requestId,
       ip,
       mode: prepared.mode,
       score: prepared.score,
-      placement
+      placement,
+      isHighScore
     });
 
-    return {
-      ok: true,
-      item,
-      placement
-    };
+    return { item, placement, isHighScore };
   }
 
-  clear(): void {
+  /**
+   * Clears all scores. Requires admin authorization.
+   */
+  clear(requestId: string): void {
     this.repository.clear();
-    logger.warn("Scoreboard cleared by admin token");
+    logger.warn("Scoreboard cleared by admin", { requestId });
+  }
+
+  /**
+   * Gets statistics about the scoreboard.
+   */
+  getStats(): {
+    totalScores: number;
+    scoresByMode: Record<GameModeId, number>;
+    lastUpdated: string | null;
+  } {
+    return {
+      totalScores: this.repository.count(),
+      scoresByMode: {
+        classic: this.repository.count("classic"),
+        sprint40: this.repository.count("sprint40"),
+        blitz120: this.repository.count("blitz120")
+      },
+      lastUpdated: this.repository.getLastUpdated()
+    };
   }
 }

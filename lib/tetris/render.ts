@@ -145,53 +145,53 @@ export function renderTetris(
   ctx.strokeRect(panelX + 0.5, offsetY + 0.5, panelWidth - 1, boardH - 1);
 
   ctx.fillStyle = "#b9d8f2";
-  ctx.font = "600 17px 'Space Grotesk', sans-serif";
+  ctx.font = "600 17px 'Sora', sans-serif";
   ctx.fillText("NEXT", panelX + 14, offsetY + 30);
   drawMiniPiece(ctx, engine.getNextPieceType(), panelX + 14, offsetY + 44, Math.max(14, cellSize * 0.55));
 
   ctx.fillStyle = "#b9d8f2";
-  ctx.font = "600 17px 'Space Grotesk', sans-serif";
+  ctx.font = "600 17px 'Sora', sans-serif";
   ctx.fillText("HOLD", panelX + 14, offsetY + 114);
   const holdType = engine.getHoldPieceType();
   if (holdType) {
     drawMiniPiece(ctx, holdType, panelX + 14, offsetY + 126, Math.max(12, cellSize * 0.5));
   } else {
     ctx.fillStyle = "rgba(176, 205, 228, 0.8)";
-    ctx.font = "500 13px 'Space Grotesk', sans-serif";
+    ctx.font = "500 13px 'Sora', sans-serif";
     ctx.fillText("vazio", panelX + 14, offsetY + 147);
   }
 
   const statBaseY = offsetY + Math.max(218, cellSize * 9.4);
   const lineGap = 34;
   ctx.fillStyle = "rgba(157, 190, 215, 0.9)";
-  ctx.font = "500 15px 'Space Grotesk', sans-serif";
+  ctx.font = "500 15px 'Sora', sans-serif";
   ctx.fillText("SCORE", panelX + 14, statBaseY);
   ctx.fillStyle = "#f9be73";
-  ctx.font = "700 26px 'Bebas Neue', sans-serif";
+  ctx.font = "700 26px 'Oswald', sans-serif";
   ctx.fillText(String(engine.score), panelX + 14, statBaseY + 27);
 
   ctx.fillStyle = "rgba(157, 190, 215, 0.9)";
-  ctx.font = "500 15px 'Space Grotesk', sans-serif";
+  ctx.font = "500 15px 'Sora', sans-serif";
   ctx.fillText("LINHAS", panelX + 14, statBaseY + lineGap + 8);
   ctx.fillStyle = "#8fd6ff";
-  ctx.font = "700 24px 'Bebas Neue', sans-serif";
+  ctx.font = "700 24px 'Oswald', sans-serif";
   ctx.fillText(String(engine.lines), panelX + 14, statBaseY + lineGap + 33);
 
   ctx.fillStyle = "rgba(157, 190, 215, 0.9)";
-  ctx.font = "500 15px 'Space Grotesk', sans-serif";
+  ctx.font = "500 15px 'Sora', sans-serif";
   ctx.fillText("NIVEL", panelX + 14, statBaseY + lineGap * 2 + 14);
   ctx.fillStyle = "#ffd166";
-  ctx.font = "700 24px 'Bebas Neue', sans-serif";
+  ctx.font = "700 24px 'Oswald', sans-serif";
   ctx.fillText(String(engine.level), panelX + 14, statBaseY + lineGap * 2 + 39);
 
   if (engine.gameOver) {
     ctx.fillStyle = "rgba(2, 8, 14, 0.72)";
     ctx.fillRect(offsetX, offsetY, boardW, boardH);
     ctx.fillStyle = "#ff8787";
-    ctx.font = "700 34px 'Bebas Neue', sans-serif";
+    ctx.font = "700 34px 'Oswald', sans-serif";
     ctx.fillText("GAME OVER", offsetX + boardW * 0.18, offsetY + boardH * 0.48);
     ctx.fillStyle = "#d1e5f7";
-    ctx.font = "500 15px 'Space Grotesk', sans-serif";
+    ctx.font = "500 15px 'Sora', sans-serif";
     ctx.fillText("Use o botao Reiniciar para jogar novamente.", offsetX + boardW * 0.12, offsetY + boardH * 0.56);
   }
 }

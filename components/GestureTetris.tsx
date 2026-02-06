@@ -1,26 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { fetchScores, submitScore, type ScoreItem } from "@/lib/client/scoreboard-api";
+import {
+  DEFAULT_OBJECTIVE_BY_MODE,
+  DEFAULT_SENSITIVITY,
+  GESTURE_TIMELINE_LIMIT,
+  INPUT_MODE_OPTIONS,
+  LEADERBOARD_LIMIT,
+  VISION_PRESETS,
+  type InputModeId,
+  type RuntimeStatus,
+  type VisionPresetId
+} from "@/components/tetris/config";
+import {
+  applyGesture,
+  drawCameraPreview,
+  endReasonLabel,
+  fitCanvasToDisplay,
+  formatDuration,
+  formatTimelineTime,
+  sensitivityToThresholds,
+  type GestureOverlayState
+} from "@/components/tetris/utils";
 import { usePersistentState } from "@/hooks/use-persistent-state";
+import { fetchScores, submitScore, type ScoreItem } from "@/lib/client/scoreboard-api";
+import { GAME_MODE_LIST, type GameModeId } from "@/lib/shared/game-mode";
 import { renderTetris } from "@/lib/tetris/render";
 import { TetrisSession, type SessionEndReason } from "@/lib/tetris/session";
-import { GAME_MODE_LIST, type GameModeId } from "@/lib/shared/game-mode";
-import {
-  HandGestureDetector,
-  type DetectionDebug,
-  type GestureKind,
-  type GestureThresholds
-} from "@/lib/vision/gesture-detector";
+import { HandGestureDetector, type DetectionDebug } from "@/lib/vision/gesture-detector";
 import { loadOpenCv } from "@/lib/vision/opencv-loader";
-
-type RuntimeStatus = "loading" | "ready" | "error";
-
-interface GestureUiState {
-  label: string;
-  confidence: number;
-  expiresAt: number;
-}
 
 interface HudState {
   score: number;
@@ -32,6 +40,8 @@ interface HudState {
   remainingMs: number | null;
   paused: boolean;
   running: boolean;
+  elapsedMs: number;
+  dropIntervalMs: number;
 }
 
 interface FinalSnapshot {
@@ -50,214 +60,150 @@ interface GestureTimelineItem {
   timestamp: number;
 }
 
-const PROCESS_WIDTH = 320;
-const PROCESS_HEIGHT = 240;
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+interface GestureSessionStats {
+  total: number;
+  confidenceSum: number;
 }
 
-function applyGesture(session: TetrisSession, kind: GestureKind): void {
-  switch (kind) {
-    case "move_left":
-      session.moveHorizontal(-1);
-      break;
-    case "move_right":
-      session.moveHorizontal(1);
-      break;
-    case "rotate_cw":
-      session.rotate(true);
-      break;
-    case "rotate_ccw":
-      session.rotate(false);
-      break;
-    case "hard_drop":
-      session.hardDrop();
-      break;
-    default:
-      break;
+type BadgeState = RuntimeStatus | "warn";
+
+const FPS_GOOD_THRESHOLD = 55;
+const FPS_MEDIUM_THRESHOLD = 35;
+
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
   }
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
 }
 
-function fitCanvasToDisplay(canvas: HTMLCanvasElement): void {
-  const rect = canvas.getBoundingClientRect();
-  const ratio = window.devicePixelRatio || 1;
-  const width = Math.max(1, Math.floor(rect.width * ratio));
-  const height = Math.max(1, Math.floor(rect.height * ratio));
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
+function statusLabel(status: RuntimeStatus): string {
+  if (status === "ready") {
+    return "pronto";
   }
-}
-
-function sensitivityToThresholds(value: number): Partial<GestureThresholds> {
-  const normalized = clamp(value / 100, 0, 1);
-  return {
-    lateralVelocity: 620 - normalized * 340,
-    verticalDropVelocity: 980 - normalized * 420,
-    verticalNoiseCap: 660 - normalized * 190,
-    rotationAccumulatedDeg: 24 - normalized * 12,
-    rotationAngularVelocity: 122 - normalized * 60
-  };
-}
-
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-function endReasonLabel(reason: SessionEndReason): string {
-  if (reason === "sprint_complete") {
-    return "Sprint concluido";
+  if (status === "loading") {
+    return "carregando";
   }
-  if (reason === "time_up") {
-    return "Tempo encerrado";
-  }
-  if (reason === "top_out") {
-    return "Topo atingido";
-  }
-  return "Partida finalizada";
-}
-
-function drawCameraPreview(
-  ctx: CanvasRenderingContext2D,
-  video: HTMLVideoElement | null,
-  debug: DetectionDebug | null,
-  gesture: GestureUiState | null,
-  now: number,
-  cameraReady: boolean
-): void {
-  const { width, height } = ctx.canvas;
-  ctx.clearRect(0, 0, width, height);
-
-  const bg = ctx.createLinearGradient(0, 0, 0, height);
-  bg.addColorStop(0, "#091524");
-  bg.addColorStop(1, "#162943");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, width, height);
-
-  if (cameraReady && video && video.readyState >= 2) {
-    ctx.save();
-    ctx.translate(width, 0);
-    ctx.scale(-1, 1);
-    ctx.drawImage(video, 0, 0, width, height);
-    ctx.restore();
-  } else {
-    ctx.fillStyle = "rgba(226, 237, 249, 0.85)";
-    ctx.font = "500 14px 'Space Grotesk', sans-serif";
-    ctx.fillText("Aguardando camera...", 14, height / 2);
-  }
-
-  if (debug) {
-    ctx.save();
-    ctx.strokeStyle = "rgba(245, 178, 103, 0.88)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(debug.controlZoneX, 0);
-    ctx.lineTo(debug.controlZoneX, height);
-    ctx.stroke();
-
-    if (debug.detected && debug.centroid) {
-      const { x, y } = debug.centroid;
-      ctx.fillStyle = "rgba(80, 206, 255, 0.95)";
-      ctx.beginPath();
-      ctx.arc(x, y, 7, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (debug.fingertip) {
-        ctx.strokeStyle = "rgba(130, 255, 191, 0.92)";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(x, y);
-        ctx.lineTo(debug.fingertip.x, debug.fingertip.y);
-        ctx.stroke();
-      }
-
-      const angleRad = (debug.angleDeg * Math.PI) / 180;
-      ctx.strokeStyle = "rgba(255, 126, 126, 0.95)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + Math.cos(angleRad) * 32, y + Math.sin(angleRad) * 32);
-      ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  ctx.fillStyle = "rgba(7, 16, 29, 0.72)";
-  ctx.fillRect(0, 0, width, 38);
-  ctx.fillStyle = "rgba(226, 239, 252, 0.92)";
-  ctx.font = "500 12px 'Space Grotesk', sans-serif";
-  if (debug) {
-    ctx.fillText(`Confianca ${(debug.confidence * 100).toFixed(0)}%`, 10, 14);
-    ctx.fillText(`Area ${Math.round(debug.contourArea)}`, 10, 30);
-    ctx.fillText(`VY ${Math.round(debug.velocity.y)} px/s`, width - 138, 14);
-    ctx.fillText(`Ang ${debug.angleDeg.toFixed(1)} deg`, width - 138, 30);
-  } else {
-    ctx.fillText("Sem deteccao ativa", 10, 22);
-  }
-
-  if (gesture && now <= gesture.expiresAt) {
-    const alpha = clamp((gesture.expiresAt - now) / 700, 0.18, 1);
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = "rgba(252, 174, 93, 0.9)";
-    ctx.fillRect(10, height - 44, width - 20, 30);
-    ctx.fillStyle = "#132137";
-    ctx.font = "700 14px 'Space Grotesk', sans-serif";
-    ctx.fillText(`${gesture.label} (${Math.round(gesture.confidence * 100)}%)`, 16, height - 24);
-    ctx.globalAlpha = 1;
-  }
+  return "erro";
 }
 
 export default function GestureTetris() {
   const sessionRef = useRef(new TetrisSession("classic"));
   const detectorRef = useRef<HandGestureDetector | null>(null);
+  const cvRuntimeRef = useRef<unknown | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const gameCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const processingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gameCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const cameraCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const processCtxRef = useRef<CanvasRenderingContext2D | null>(null);
   const rafRef = useRef<number | null>(null);
   const debugRef = useRef<DetectionDebug | null>(null);
-  const gestureRef = useRef<GestureUiState | null>(null);
+  const gestureOverlayRef = useRef<GestureOverlayState | null>(null);
   const scorePromptShownRef = useRef(false);
   const cameraReadyRef = useRef(false);
   const cvReadyRef = useRef(false);
-  const sensitivityRef = useRef(52);
+  const sensitivityRef = useRef(DEFAULT_SENSITIVITY);
+  const inputModeRef = useRef<InputModeId>("hybrid");
+  const detectionIntervalRef = useRef(32);
+  const showDebugOverlayRef = useRef(true);
+  const leaderboardRequestRef = useRef(0);
+  const gestureCounterRef = useRef(0);
 
   const [mode, setMode] = usePersistentState<GameModeId>("gesture_tetris_mode", "classic");
-  const [sensitivity, setSensitivity] = usePersistentState<number>("gesture_tetris_sensitivity", 52);
+  const [sensitivity, setSensitivity] = usePersistentState<number>(
+    "gesture_tetris_sensitivity",
+    DEFAULT_SENSITIVITY
+  );
   const [playerName, setPlayerName] = usePersistentState<string>("gesture_tetris_player_name", "Player");
+  const [inputMode, setInputMode] = usePersistentState<InputModeId>("gesture_tetris_input_mode", "hybrid");
+  const [visionPresetId, setVisionPresetId] = usePersistentState<VisionPresetId>(
+    "gesture_tetris_vision_preset",
+    "balanced"
+  );
+  const [autoPauseOnBlur, setAutoPauseOnBlur] = usePersistentState<boolean>(
+    "gesture_tetris_auto_pause",
+    true
+  );
+  const [showDebugOverlay, setShowDebugOverlay] = usePersistentState<boolean>(
+    "gesture_tetris_show_debug",
+    true
+  );
+  const [highContrastUi, setHighContrastUi] = usePersistentState<boolean>(
+    "gesture_tetris_high_contrast",
+    false
+  );
 
   const [cameraStatus, setCameraStatus] = useState<RuntimeStatus>("loading");
   const [cvStatus, setCvStatus] = useState<RuntimeStatus>("loading");
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cvError, setCvError] = useState<string | null>(null);
-
   const [gestureLabel, setGestureLabel] = useState("Aguardando gesto");
+  const [announcement, setAnnouncement] = useState("");
   const [hud, setHud] = useState<HudState>({
     score: 0,
     lines: 0,
     level: 1,
     fps: 0,
-    objective: "Sobreviva o maximo possivel.",
+    objective: DEFAULT_OBJECTIVE_BY_MODE.classic,
     progress: 0,
     remainingMs: null,
     paused: false,
-    running: true
+    running: true,
+    elapsedMs: 0,
+    dropIntervalMs: 850
   });
-
   const [leaderboard, setLeaderboard] = useState<ScoreItem[]>([]);
   const [leaderboardLoading, setLeaderboardLoading] = useState(false);
   const [leaderboardError, setLeaderboardError] = useState<string | null>(null);
   const [gestureTimeline, setGestureTimeline] = useState<GestureTimelineItem[]>([]);
-
+  const [gestureStats, setGestureStats] = useState<GestureSessionStats>({
+    total: 0,
+    confidenceSum: 0
+  });
   const [finalSnapshot, setFinalSnapshot] = useState<FinalSnapshot | null>(null);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [submitMessage, setSubmitMessage] = useState<string | null>(null);
+  const [cvRuntimeReady, setCvRuntimeReady] = useState(false);
 
   const selectedMode = useMemo(() => GAME_MODE_LIST.find((item) => item.id === mode), [mode]);
+  const selectedVisionPreset = useMemo(
+    () => VISION_PRESETS.find((item) => item.id === visionPresetId) ?? VISION_PRESETS[1],
+    [visionPresetId]
+  );
+  const selectedInputMode = useMemo(
+    () => INPUT_MODE_OPTIONS.find((item) => item.id === inputMode) ?? INPUT_MODE_OPTIONS[0],
+    [inputMode]
+  );
+
+  const averageConfidence = useMemo(() => {
+    if (gestureStats.total === 0) {
+      return 0;
+    }
+    return Math.round((gestureStats.confidenceSum / gestureStats.total) * 100);
+  }, [gestureStats.confidenceSum, gestureStats.total]);
+
+  const actionsPerMinute = useMemo(() => {
+    const elapsedMinutes = Math.max(hud.elapsedMs / 60000, 1 / 60);
+    return Math.round(gestureStats.total / elapsedMinutes);
+  }, [gestureStats.total, hud.elapsedMs]);
+
+  const fpsHealth = useMemo(() => {
+    if (hud.fps >= FPS_GOOD_THRESHOLD) {
+      return "Estavel";
+    }
+    if (hud.fps >= FPS_MEDIUM_THRESHOLD) {
+      return "Intermediario";
+    }
+    return "Baixo";
+  }, [hud.fps]);
+
+  const cameraBadgeState: BadgeState = inputMode === "keyboard_only" ? "warn" : cameraStatus;
+  const cameraBadgeLabel =
+    inputMode === "keyboard_only" ? "camera desligada" : `camera ${statusLabel(cameraStatus)}`;
+  const sessionStateLabel = hud.paused ? "pausado" : hud.running ? "rodando" : "encerrado";
 
   useEffect(() => {
     if (!GAME_MODE_LIST.some((item) => item.id === mode)) {
@@ -265,16 +211,53 @@ export default function GestureTetris() {
     }
   }, [mode, setMode]);
 
+  useEffect(() => {
+    if (!INPUT_MODE_OPTIONS.some((item) => item.id === inputMode)) {
+      setInputMode("hybrid");
+    }
+  }, [inputMode, setInputMode]);
+
+  useEffect(() => {
+    if (!VISION_PRESETS.some((item) => item.id === visionPresetId)) {
+      setVisionPresetId("balanced");
+    }
+  }, [setVisionPresetId, visionPresetId]);
+
+  const rebuildVisionPipeline = useCallback((runtime: unknown, width: number, height: number) => {
+    const processCanvas = document.createElement("canvas");
+    processCanvas.width = width;
+    processCanvas.height = height;
+    processingCanvasRef.current = processCanvas;
+    processCtxRef.current = processCanvas.getContext("2d", { willReadFrequently: true });
+
+    detectorRef.current?.dispose();
+    detectorRef.current = new HandGestureDetector(runtime as never, {
+      width,
+      height,
+      thresholds: sensitivityToThresholds(sensitivityRef.current)
+    });
+  }, []);
+
   const loadLeaderboard = useCallback(async (selectedModeId: GameModeId) => {
+    const requestId = ++leaderboardRequestRef.current;
     setLeaderboardLoading(true);
     setLeaderboardError(null);
+
     try {
-      const items = await fetchScores(selectedModeId, 8);
+      const items = await fetchScores(selectedModeId, LEADERBOARD_LIMIT);
+      if (requestId !== leaderboardRequestRef.current) {
+        return;
+      }
       setLeaderboard(items);
     } catch (error) {
+      if (requestId !== leaderboardRequestRef.current) {
+        return;
+      }
       setLeaderboardError(error instanceof Error ? error.message : "Falha ao carregar placar.");
     } finally {
-      setLeaderboardLoading(false);
+      if (requestId === leaderboardRequestRef.current) {
+        setLeaderboardLoading(false);
+      }
     }
   }, []);
 
@@ -284,41 +267,127 @@ export default function GestureTetris() {
       sessionRef.current.reset(targetMode);
       scorePromptShownRef.current = false;
       debugRef.current = null;
-      gestureRef.current = null;
+      gestureOverlayRef.current = null;
+      gestureCounterRef.current = 0;
       setFinalSnapshot(null);
       setSubmitMessage(null);
-      setGestureLabel("Aguardando gesto");
+      setGestureLabel(inputModeRef.current === "keyboard_only" ? "Entrada por teclado" : "Aguardando gesto");
       setGestureTimeline([]);
-      setHud((previous) => ({
-        ...previous,
+      setGestureStats({
+        total: 0,
+        confidenceSum: 0
+      });
+      setHud({
         score: 0,
         lines: 0,
         level: 1,
-        objective:
-          targetMode === "classic"
-            ? "Sobreviva o maximo possivel."
-            : targetMode === "sprint40"
-              ? "Linhas: 0/40"
-              : "Tempo restante: 120s",
+        fps: 0,
+        objective: DEFAULT_OBJECTIVE_BY_MODE[targetMode],
         progress: 0,
         remainingMs: targetMode === "blitz120" ? 120_000 : null,
         paused: false,
-        running: true
-      }));
+        running: true,
+        elapsedMs: 0,
+        dropIntervalMs: 850
+      });
     },
     [mode]
   );
 
   useEffect(() => {
-    const processCanvas = document.createElement("canvas");
-    processCanvas.width = PROCESS_WIDTH;
-    processCanvas.height = PROCESS_HEIGHT;
-    processingCanvasRef.current = processCanvas;
+    sensitivityRef.current = sensitivity;
+    detectorRef.current?.setThresholds(sensitivityToThresholds(sensitivity));
+  }, [sensitivity]);
+
+  useEffect(() => {
+    inputModeRef.current = inputMode;
+    if (inputMode === "keyboard_only") {
+      debugRef.current = null;
+      gestureOverlayRef.current = null;
+      setGestureLabel("Entrada por teclado");
+    } else if (!finalSnapshot) {
+      setGestureLabel("Aguardando gesto");
+    }
+  }, [finalSnapshot, inputMode]);
+
+  useEffect(() => {
+    detectionIntervalRef.current = selectedVisionPreset.sampleIntervalMs;
+  }, [selectedVisionPreset.sampleIntervalMs]);
+
+  useEffect(() => {
+    showDebugOverlayRef.current = showDebugOverlay;
+  }, [showDebugOverlay]);
+
+  useEffect(() => {
+    let active = true;
+    setCvStatus("loading");
+    setCvError(null);
+
+    const setup = async () => {
+      try {
+        const runtime = await loadOpenCv();
+        if (!active) {
+          return;
+        }
+        cvRuntimeRef.current = runtime;
+        setCvRuntimeReady(true);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Falha ao iniciar OpenCV.js.";
+        cvReadyRef.current = false;
+        setCvStatus("error");
+        setCvError(message);
+      }
+    };
+
+    setup();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!cvRuntimeReady || !cvRuntimeRef.current) {
+      return;
+    }
+
+    try {
+      setCvStatus("loading");
+      setCvError(null);
+      rebuildVisionPipeline(cvRuntimeRef.current, selectedVisionPreset.width, selectedVisionPreset.height);
+      cvReadyRef.current = true;
+      setCvStatus("ready");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Falha ao configurar detector.";
+      cvReadyRef.current = false;
+      setCvStatus("error");
+      setCvError(message);
+    }
+  }, [cvRuntimeReady, rebuildVisionPipeline, selectedVisionPreset.height, selectedVisionPreset.width]);
+
+  useEffect(() => {
+    return () => {
+      detectorRef.current?.dispose();
+      detectorRef.current = null;
+      cvReadyRef.current = false;
+    };
   }, []);
 
   useEffect(() => {
     let active = true;
     let stream: MediaStream | null = null;
+
+    if (inputMode === "keyboard_only") {
+      setCameraError(null);
+      setCameraStatus("ready");
+      cameraReadyRef.current = false;
+      return () => {
+        active = false;
+      };
+    }
+
+    setCameraStatus("loading");
+    setCameraError(null);
 
     const setup = async () => {
       try {
@@ -340,8 +409,10 @@ export default function GestureTetris() {
         if (!video) {
           throw new Error("Elemento de video nao encontrado.");
         }
+
         video.srcObject = stream;
         await video.play();
+
         if (!active) {
           stream.getTracks().forEach((track) => track.stop());
           return;
@@ -366,78 +437,63 @@ export default function GestureTetris() {
         stream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-
-    const setup = async () => {
-      try {
-        const cvRuntime = await loadOpenCv();
-        if (!active) {
-          return;
-        }
-        detectorRef.current = new HandGestureDetector(cvRuntime, {
-          width: PROCESS_WIDTH,
-          height: PROCESS_HEIGHT,
-          thresholds: sensitivityToThresholds(sensitivityRef.current)
-        });
-        cvReadyRef.current = true;
-        setCvStatus("ready");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Falha ao iniciar OpenCV.js.";
-        cvReadyRef.current = false;
-        setCvStatus("error");
-        setCvError(message);
-      }
-    };
-
-    setup();
-
-    return () => {
-      active = false;
-      cvReadyRef.current = false;
-      detectorRef.current?.dispose();
-      detectorRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    sensitivityRef.current = sensitivity;
-    detectorRef.current?.setThresholds(sensitivityToThresholds(sensitivity));
-  }, [sensitivity]);
+  }, [inputMode]);
 
   useEffect(() => {
     resetSession(mode);
     loadLeaderboard(mode).catch(() => {});
-  }, [mode, loadLeaderboard, resetSession]);
+  }, [loadLeaderboard, mode, resetSession]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableElement(event.target)) {
+        return;
+      }
+
       const session = sessionRef.current;
+      const allowPieceKeyboard = inputModeRef.current !== "gesture_only";
+
       switch (event.key) {
         case "ArrowLeft":
+          if (!allowPieceKeyboard) {
+            return;
+          }
           event.preventDefault();
           session.moveHorizontal(-1);
           break;
         case "ArrowRight":
+          if (!allowPieceKeyboard) {
+            return;
+          }
           event.preventDefault();
           session.moveHorizontal(1);
           break;
         case "ArrowUp":
+          if (!allowPieceKeyboard) {
+            return;
+          }
           event.preventDefault();
           session.rotate(true);
           break;
         case "ArrowDown":
+          if (!allowPieceKeyboard) {
+            return;
+          }
           event.preventDefault();
           session.softDrop();
           break;
         case " ":
+          if (!allowPieceKeyboard) {
+            return;
+          }
           event.preventDefault();
           session.hardDrop();
           break;
         case "c":
         case "C":
+          if (!allowPieceKeyboard) {
+            return;
+          }
           event.preventDefault();
           session.hold();
           break;
@@ -461,6 +517,26 @@ export default function GestureTetris() {
   }, [resetSession]);
 
   useEffect(() => {
+    if (!autoPauseOnBlur) {
+      return;
+    }
+
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        return;
+      }
+      const snapshot = sessionRef.current.getSnapshot();
+      if (snapshot.running && !snapshot.paused) {
+        sessionRef.current.setPaused(true);
+        setAnnouncement("Partida pausada automaticamente ao trocar de aba.");
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [autoPauseOnBlur]);
+
+  useEffect(() => {
     let last = performance.now();
     let hudAccumulator = 0;
     let gestureAccumulator = 0;
@@ -481,79 +557,92 @@ export default function GestureTetris() {
       const gameCanvas = gameCanvasRef.current;
       if (gameCanvas) {
         fitCanvasToDisplay(gameCanvas);
-        const gameCtx = gameCanvas.getContext("2d");
+        if (!gameCtxRef.current || gameCtxRef.current.canvas !== gameCanvas) {
+          gameCtxRef.current = gameCanvas.getContext("2d");
+        }
+        const gameCtx = gameCtxRef.current;
         if (gameCtx) {
           renderTetris(gameCtx, session.getEngine(), { now });
           if (snapshot.paused) {
-            gameCtx.fillStyle = "rgba(5, 10, 18, 0.7)";
+            gameCtx.fillStyle = "rgba(6, 12, 20, 0.68)";
             gameCtx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
             gameCtx.fillStyle = "#f4f8ff";
-            gameCtx.font = "700 42px 'Bebas Neue', sans-serif";
-            gameCtx.fillText("PAUSADO", gameCanvas.width * 0.39, gameCanvas.height * 0.5);
+            gameCtx.font = "700 42px 'Oswald', sans-serif";
+            gameCtx.fillText("PAUSADO", gameCanvas.width * 0.37, gameCanvas.height * 0.5);
           }
         }
       }
 
       const cameraCanvas = cameraCanvasRef.current;
       if (cameraCanvas) {
-        const cameraCtx = cameraCanvas.getContext("2d");
+        if (!cameraCtxRef.current || cameraCtxRef.current.canvas !== cameraCanvas) {
+          cameraCtxRef.current = cameraCanvas.getContext("2d");
+        }
+        const cameraCtx = cameraCtxRef.current;
         if (cameraCtx) {
-          drawCameraPreview(
-            cameraCtx,
-            videoRef.current,
-            debugRef.current,
-            gestureRef.current,
+          drawCameraPreview({
+            ctx: cameraCtx,
+            video: videoRef.current,
+            debug: debugRef.current,
+            gesture: gestureOverlayRef.current,
             now,
-            cameraReadyRef.current
-          );
+            cameraReady: cameraReadyRef.current && inputModeRef.current !== "keyboard_only",
+            showDebug: showDebugOverlayRef.current
+          });
         }
       }
 
       gestureAccumulator += dt;
       if (
-        gestureAccumulator >= 32 &&
+        gestureAccumulator >= detectionIntervalRef.current &&
         detectorRef.current &&
+        processCtxRef.current &&
+        processingCanvasRef.current &&
         cameraReadyRef.current &&
         cvReadyRef.current &&
         snapshot.running &&
-        !snapshot.paused
+        !snapshot.paused &&
+        inputModeRef.current !== "keyboard_only"
       ) {
         gestureAccumulator = 0;
-        const processCanvas = processingCanvasRef.current;
-        const video = videoRef.current;
-        if (processCanvas && video && video.readyState >= 2) {
-          const processCtx = processCanvas.getContext("2d", { willReadFrequently: true });
-          if (processCtx) {
-            processCtx.save();
-            processCtx.translate(PROCESS_WIDTH, 0);
-            processCtx.scale(-1, 1);
-            processCtx.drawImage(video, 0, 0, PROCESS_WIDTH, PROCESS_HEIGHT);
-            processCtx.restore();
-            const imageData = processCtx.getImageData(0, 0, PROCESS_WIDTH, PROCESS_HEIGHT);
-            const result = detectorRef.current.process(imageData, now);
-            debugRef.current = result.debug;
 
-            if (result.gesture) {
-              const recognized = result.gesture;
-              applyGesture(session, recognized.kind);
-              gestureRef.current = {
-                label: recognized.label,
-                confidence: recognized.confidence,
-                expiresAt: now + 700
-              };
-              setGestureLabel(recognized.label);
-              setGestureTimeline((previous) =>
-                [
-                  {
-                    id: `${now}-${Math.random().toString(16).slice(2, 8)}`,
-                    label: recognized.label,
-                    confidence: recognized.confidence,
-                    timestamp: now
-                  },
-                  ...previous
-                ].slice(0, 6)
-              );
-            }
+        const processCanvas = processingCanvasRef.current;
+        const processCtx = processCtxRef.current;
+        const video = videoRef.current;
+        if (processCanvas && processCtx && video && video.readyState >= 2) {
+          processCtx.save();
+          processCtx.translate(processCanvas.width, 0);
+          processCtx.scale(-1, 1);
+          processCtx.drawImage(video, 0, 0, processCanvas.width, processCanvas.height);
+          processCtx.restore();
+          const imageData = processCtx.getImageData(0, 0, processCanvas.width, processCanvas.height);
+          const result = detectorRef.current.process(imageData, now);
+          debugRef.current = result.debug;
+
+          if (result.gesture) {
+            const recognized = result.gesture;
+            applyGesture(session, recognized.kind);
+            gestureOverlayRef.current = {
+              label: recognized.label,
+              confidence: recognized.confidence,
+              expiresAt: now + 700
+            };
+            setGestureLabel(recognized.label);
+            setGestureTimeline((previous) =>
+              [
+                {
+                  id: `gesture-${gestureCounterRef.current++}`,
+                  label: recognized.label,
+                  confidence: recognized.confidence,
+                  timestamp: Date.now()
+                },
+                ...previous
+              ].slice(0, GESTURE_TIMELINE_LIMIT)
+            );
+            setGestureStats((previous) => ({
+              total: previous.total + 1,
+              confidenceSum: previous.confidenceSum + recognized.confidence
+            }));
           }
         }
       }
@@ -578,11 +667,13 @@ export default function GestureTetris() {
           progress: freshSnapshot.progress,
           remainingMs: freshSnapshot.remainingMs,
           paused: freshSnapshot.paused,
-          running: freshSnapshot.running
+          running: freshSnapshot.running,
+          elapsedMs: freshSnapshot.elapsedMs,
+          dropIntervalMs: freshSnapshot.game.dropIntervalMs
         });
 
-        if (gestureRef.current && now > gestureRef.current.expiresAt) {
-          setGestureLabel("Aguardando gesto");
+        if (gestureOverlayRef.current && now > gestureOverlayRef.current.expiresAt) {
+          setGestureLabel(inputModeRef.current === "keyboard_only" ? "Entrada por teclado" : "Aguardando gesto");
         }
 
         if (freshSnapshot.endReason && !scorePromptShownRef.current) {
@@ -596,6 +687,7 @@ export default function GestureTetris() {
             endReason: freshSnapshot.endReason
           };
           setFinalSnapshot(finalState);
+          setAnnouncement("Partida encerrada. Voce pode enviar o score para o ranking.");
         }
       }
 
@@ -609,6 +701,18 @@ export default function GestureTetris() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (cameraError) {
+      setAnnouncement(`Erro na camera: ${cameraError}`);
+    }
+  }, [cameraError]);
+
+  useEffect(() => {
+    if (cvError) {
+      setAnnouncement(`Erro no OpenCV: ${cvError}`);
+    }
+  }, [cvError]);
 
   const onSubmitScore = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -629,6 +733,7 @@ export default function GestureTetris() {
           durationMs: finalSnapshot.durationMs
         });
         setSubmitMessage(`Score salvo no ranking. Posicao #${response.placement}.`);
+        setAnnouncement(`Score enviado. Posicao ${response.placement}.`);
         await loadLeaderboard(finalSnapshot.mode);
       } catch (error) {
         setSubmitMessage(error instanceof Error ? error.message : "Falha ao enviar score.");
@@ -639,24 +744,67 @@ export default function GestureTetris() {
     [finalSnapshot, loadLeaderboard, playerName]
   );
 
+  const autoTuneSensitivity = useCallback(() => {
+    if (gestureStats.total < 4) {
+      setAnnouncement("Calibracao indisponivel. Gere mais gestos antes de ajustar.");
+      return;
+    }
+
+    const average = gestureStats.confidenceSum / gestureStats.total;
+    let nextSensitivity = sensitivity;
+    if (average < 0.35) {
+      nextSensitivity = Math.max(24, sensitivity - 10);
+    } else if (average > 0.72) {
+      nextSensitivity = Math.min(92, sensitivity + 8);
+    }
+
+    setSensitivity(nextSensitivity);
+    setAnnouncement(`Sensibilidade ajustada automaticamente para ${nextSensitivity}%.`);
+  }, [gestureStats.confidenceSum, gestureStats.total, sensitivity, setSensitivity]);
+
   return (
-    <section className="product-shell" aria-label="Aplicacao principal do Tetris por gestos">
-      <header className="top-hero">
+    <section
+      className="arena-shell"
+      data-contrast={highContrastUi ? "high" : "normal"}
+      aria-label="Aplicacao principal do Tetris por gestos"
+    >
+      <p className="sr-only" aria-live="polite">
+        {announcement}
+      </p>
+
+      <header className="arena-hero">
         <div className="hero-copy">
-          <p className="hero-kicker">Vision + Gameplay em tempo real</p>
-          <h1>Tetris Gesture Arena</h1>
+          <p className="hero-kicker">Realtime vision controlled gameplay</p>
+          <h1>Tetris Gesture Control Deck</h1>
           <p>
-            Controle as pecas sem teclado: deslocamento lateral da mao, rotacao do pulso e gesto de
-            queda rapida para hard drop.
+            Direcione pecas por gesto da mao, combine com teclado quando quiser e acompanhe a saude
+            de runtime em um painel tecnico de alto contraste.
           </p>
+          <div className="hero-meta-grid">
+            <article>
+              <span>Input atual</span>
+              <strong>{selectedInputMode.label}</strong>
+            </article>
+            <article>
+              <span>Preset visao</span>
+              <strong>{selectedVisionPreset.label}</strong>
+            </article>
+            <article>
+              <span>Estado</span>
+              <strong>{sessionStateLabel}</strong>
+            </article>
+            <article>
+              <span>FPS</span>
+              <strong>
+                {hud.fps} ({fpsHealth})
+              </strong>
+            </article>
+          </div>
         </div>
-        <div className="hero-actions">
-          <label htmlFor="mode-select">Modo</label>
-          <select
-            id="mode-select"
-            value={mode}
-            onChange={(event) => setMode(event.target.value as GameModeId)}
-          >
+
+        <div className="hero-config">
+          <label htmlFor="mode-select">Modo de jogo</label>
+          <select id="mode-select" value={mode} onChange={(event) => setMode(event.target.value as GameModeId)}>
             {GAME_MODE_LIST.map((item) => (
               <option key={item.id} value={item.id}>
                 {item.label}
@@ -664,12 +812,48 @@ export default function GestureTetris() {
             ))}
           </select>
           <p>{selectedMode?.description}</p>
+
+          <div className="toggle-group">
+            <span>Perfil de input</span>
+            <div className="chip-row">
+              {INPUT_MODE_OPTIONS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={item.id === inputMode ? "chip is-active" : "chip"}
+                  onClick={() => setInputMode(item.id)}
+                  aria-pressed={item.id === inputMode}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <p>{selectedInputMode.description}</p>
+          </div>
+
+          <div className="toggle-group">
+            <span>Preset de visao</span>
+            <div className="chip-row">
+              {VISION_PRESETS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={item.id === visionPresetId ? "chip is-active" : "chip"}
+                  onClick={() => setVisionPresetId(item.id)}
+                  aria-pressed={item.id === visionPresetId}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <p>{selectedVisionPreset.description}</p>
+          </div>
         </div>
       </header>
 
-      <div className="layout-grid">
+      <div className="arena-layout">
         <section className="board-column">
-          <div className="board-card">
+          <article className="board-card">
             <canvas
               ref={gameCanvasRef}
               className="game-canvas"
@@ -680,57 +864,80 @@ export default function GestureTetris() {
               <span>Gesto reconhecido</span>
               <strong>{gestureLabel}</strong>
             </div>
-          </div>
+          </article>
 
-          <div className="progress-row" aria-live="polite">
-            <div className="progress-label">
+          <article className="objective-card" aria-live="polite">
+            <div className="objective-labels">
               <span>Objetivo</span>
               <strong>{hud.objective}</strong>
             </div>
             <div className="progress-track" aria-hidden="true">
               <div style={{ width: `${Math.round(hud.progress * 100)}%` }} />
             </div>
-            {hud.remainingMs !== null && <span className="timer-pill">{formatDuration(hud.remainingMs)}</span>}
-          </div>
+            <div className="objective-tail">
+              {hud.remainingMs !== null && <span className="timer-pill">{formatDuration(hud.remainingMs)}</span>}
+              <span className="drop-pill">drop {Math.round(1000 / Math.max(1, hud.dropIntervalMs))}/s</span>
+            </div>
+          </article>
 
           <div className="metrics-grid">
-            <article>
+            <article className="metric-card">
               <span>Score</span>
               <strong>{hud.score}</strong>
             </article>
-            <article>
+            <article className="metric-card">
               <span>Linhas</span>
               <strong>{hud.lines}</strong>
             </article>
-            <article>
+            <article className="metric-card">
               <span>Nivel</span>
               <strong>{hud.level}</strong>
             </article>
-            <article>
-              <span>FPS</span>
-              <strong>{hud.fps}</strong>
+            <article className="metric-card">
+              <span>Tempo</span>
+              <strong>{formatDuration(hud.elapsedMs)}</strong>
             </article>
           </div>
+
+          <article className="insights-card">
+            <h2>Session Insights</h2>
+            <div className="insights-grid">
+              <div>
+                <span>Gestos totais</span>
+                <strong>{gestureStats.total}</strong>
+              </div>
+              <div>
+                <span>Confianca media</span>
+                <strong>{averageConfidence}%</strong>
+              </div>
+              <div>
+                <span>APM</span>
+                <strong>{actionsPerMinute}</strong>
+              </div>
+              <div>
+                <span>Qualidade</span>
+                <strong>{fpsHealth}</strong>
+              </div>
+            </div>
+          </article>
         </section>
 
-        <aside className="panel-column">
-          <section className="panel-card camera-card">
-            <div className="panel-title-row">
+        <aside className="dock-column">
+          <section className="panel-card vision-card">
+            <div className="panel-head">
               <h2>Vision Feed</h2>
-              <div className="badges">
-                <span data-state={cameraStatus}>Camera {cameraStatus}</span>
-                <span data-state={cvStatus}>OpenCV {cvStatus}</span>
-                <span data-state={hud.paused ? "warn" : hud.running ? "ready" : "warn"}>
-                  {hud.paused ? "Pausado" : hud.running ? "Ativo" : "Finalizado"}
-                </span>
+              <div className="badge-row">
+                <span data-state={cameraBadgeState}>{cameraBadgeLabel}</span>
+                <span data-state={cvStatus}>opencv {statusLabel(cvStatus)}</span>
+                <span data-state={hud.paused ? "warn" : hud.running ? "ready" : "warn"}>{sessionStateLabel}</span>
               </div>
             </div>
             <canvas
               ref={cameraCanvasRef}
               className="camera-canvas"
-              width={PROCESS_WIDTH}
-              height={PROCESS_HEIGHT}
-              aria-label="Preview da camera com landmarks"
+              width={selectedVisionPreset.width}
+              height={selectedVisionPreset.height}
+              aria-label="Preview da camera com deteccao de gestos"
             />
             <video ref={videoRef} className="hidden-video" playsInline muted />
             {(cameraError || cvError) && <p className="error-line">{cameraError ?? cvError}</p>}
@@ -752,19 +959,53 @@ export default function GestureTetris() {
                 Atualizar ranking
               </button>
             </div>
-            <label htmlFor="sensitivity-range">Sensibilidade dos gestos: {sensitivity}%</label>
-            <input
-              id="sensitivity-range"
-              type="range"
-              min={20}
-              max={95}
-              value={sensitivity}
-              onChange={(event) => setSensitivity(Number(event.target.value))}
-            />
-            <ul>
-              <li>Mova a mao esquerda para deslocar a peca lateralmente.</li>
-              <li>Gire o pulso para aplicar rotacao da peca ativa.</li>
-              <li>Flick para baixo executa hard drop imediato.</li>
+
+            <div className="slider-row">
+              <label htmlFor="sensitivity-range">Sensibilidade dos gestos: {sensitivity}%</label>
+              <input
+                id="sensitivity-range"
+                type="range"
+                min={20}
+                max={95}
+                value={sensitivity}
+                onChange={(event) => setSensitivity(Number(event.target.value))}
+              />
+              <button type="button" className="subtle-button" onClick={autoTuneSensitivity}>
+                Auto calibrar via confianca media
+              </button>
+            </div>
+
+            <div className="switch-grid">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={autoPauseOnBlur}
+                  onChange={(event) => setAutoPauseOnBlur(event.target.checked)}
+                />
+                Auto pausar ao trocar de aba
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={showDebugOverlay}
+                  onChange={(event) => setShowDebugOverlay(event.target.checked)}
+                />
+                Exibir overlay tecnico da visao
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={highContrastUi}
+                  onChange={(event) => setHighContrastUi(event.target.checked)}
+                />
+                Ativar UI de alto contraste
+              </label>
+            </div>
+
+            <ul className="help-list">
+              <li>Seta esquerda/direita para ajuste fino da peca.</li>
+              <li>Flick para baixo no gesto executa hard drop.</li>
+              <li>Modo teclado reduz carga do detector para foco em performance.</li>
             </ul>
           </section>
 
@@ -777,7 +1018,10 @@ export default function GestureTetris() {
                 {leaderboard.length === 0 && <li>Nenhum score enviado ainda.</li>}
                 {leaderboard.map((entry) => (
                   <li key={entry.id}>
-                    <span>{entry.name}</span>
+                    <div>
+                      <span>{entry.name}</span>
+                      <small>{formatDuration(entry.durationMs)}</small>
+                    </div>
                     <strong>{entry.score}</strong>
                   </li>
                 ))}
@@ -791,7 +1035,10 @@ export default function GestureTetris() {
               {gestureTimeline.length === 0 && <li>Nenhum gesto capturado recentemente.</li>}
               {gestureTimeline.map((item) => (
                 <li key={item.id}>
-                  <span>{item.label}</span>
+                  <div>
+                    <span>{item.label}</span>
+                    <small>{formatTimelineTime(item.timestamp)}</small>
+                  </div>
                   <strong>{Math.round(item.confidence * 100)}%</strong>
                 </li>
               ))}

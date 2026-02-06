@@ -2,6 +2,29 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { GET, POST } from "@/app/api/scores/route";
 import { resetScoreRuntimeForTests } from "@/lib/server/scores/store";
 
+interface ScoreEntry {
+  id: string;
+  name: string;
+  score: number;
+  lines: number;
+  level: number;
+  mode: string;
+  durationMs: number;
+  createdAt: string;
+}
+
+interface SuccessResponse<T> {
+  success: true;
+  data: T;
+  meta: { requestId: string };
+}
+
+interface ErrorResponse {
+  success: false;
+  error: { error: string; code: string };
+  meta: { requestId: string };
+}
+
 describe("Scores API", () => {
   beforeEach(() => {
     resetScoreRuntimeForTests();
@@ -26,6 +49,10 @@ describe("Scores API", () => {
 
     const response = await POST(request);
     expect(response.status).toBe(400);
+
+    const json = (await response.json()) as ErrorResponse;
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe("VALIDATION_ERROR");
   });
 
   it("salva score valido e calcula colocacao", async () => {
@@ -46,9 +73,10 @@ describe("Scores API", () => {
         })
       })
     );
-    const firstJson = (await first.json()) as { placement: number };
+    const firstJson = (await first.json()) as SuccessResponse<{ placement: number }>;
     expect(first.status).toBe(201);
-    expect(firstJson.placement).toBe(1);
+    expect(firstJson.success).toBe(true);
+    expect(firstJson.data.placement).toBe(1);
 
     const second = await POST(
       new Request("http://localhost/api/scores", {
@@ -67,9 +95,9 @@ describe("Scores API", () => {
         })
       })
     );
-    const secondJson = (await second.json()) as { placement: number };
+    const secondJson = (await second.json()) as SuccessResponse<{ placement: number }>;
     expect(second.status).toBe(201);
-    expect(secondJson.placement).toBe(2);
+    expect(secondJson.data.placement).toBe(2);
   });
 
   it("retorna itens filtrados por modo", async () => {
@@ -109,11 +137,12 @@ describe("Scores API", () => {
     );
 
     const response = await GET(new Request("http://localhost/api/scores?mode=blitz120&limit=10"));
-    const json = (await response.json()) as { items: Array<{ mode: string }> };
+    const json = (await response.json()) as SuccessResponse<{ items: ScoreEntry[] }>;
 
     expect(response.status).toBe(200);
-    expect(json.items.length).toBe(1);
-    expect(json.items[0].mode).toBe("blitz120");
+    expect(json.success).toBe(true);
+    expect(json.data.items.length).toBe(1);
+    expect(json.data.items[0].mode).toBe("blitz120");
   });
 
   it("aplica rate limit para mesmo IP", async () => {
@@ -162,6 +191,8 @@ describe("Scores API", () => {
     );
 
     expect(response.status).toBe(400);
+    const json = (await response.json()) as ErrorResponse;
+    expect(json.success).toBe(false);
   });
 
   it("ordena sprint por linhas e tempo", async () => {
@@ -212,10 +243,20 @@ describe("Scores API", () => {
     );
 
     const response = await GET(new Request("http://localhost/api/scores?mode=sprint40&limit=10"));
-    const json = (await response.json()) as { items: Array<{ name: string }> };
+    const json = (await response.json()) as SuccessResponse<{ items: ScoreEntry[] }>;
     expect(response.status).toBe(200);
-    expect(json.items[0].name).toBe("PlusLines");
-    expect(json.items[1].name).toBe("Fast40");
-    expect(json.items[2].name).toBe("Slow40");
+    expect(json.success).toBe(true);
+    expect(json.data.items[0].name).toBe("PlusLines");
+    expect(json.data.items[1].name).toBe("Fast40");
+    expect(json.data.items[2].name).toBe("Slow40");
+  });
+
+  it("inclui request id em respostas", async () => {
+    const response = await GET(new Request("http://localhost/api/scores"));
+    const json = (await response.json()) as SuccessResponse<unknown>;
+
+    expect(json.meta.requestId).toBeDefined();
+    expect(typeof json.meta.requestId).toBe("string");
+    expect(response.headers.get("x-request-id")).toBe(json.meta.requestId);
   });
 });

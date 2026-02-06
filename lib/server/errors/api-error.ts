@@ -46,13 +46,22 @@ export class ApiError extends Error {
   }
 
   toPayload(requestId?: string): ApiErrorPayload {
-    return {
+    const payload: ApiErrorPayload = {
       error: this.message,
-      code: this.code,
-      ...(this.details && { details: this.details }),
-      ...(requestId && { requestId }),
-      ...(this.retryAfterMs && { retryAfterMs: this.retryAfterMs })
+      code: this.code
     };
+
+    if (this.details !== undefined) {
+      payload.details = this.details;
+    }
+    if (requestId !== undefined) {
+      payload.requestId = requestId;
+    }
+    if (this.retryAfterMs !== undefined) {
+      payload.retryAfterMs = this.retryAfterMs;
+    }
+
+    return payload;
   }
 
   static badRequest(message: string, details?: unknown): ApiError {
